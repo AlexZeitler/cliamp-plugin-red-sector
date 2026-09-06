@@ -1,6 +1,10 @@
 # cliamp-plugin-red-sector
 
-<video src="assets/preview.mp4" controls></video>
+
+
+https://github.com/user-attachments/assets/9f628a6f-8a6a-4c19-814d-8aa9c44005e9
+
+
 
 A wireframe equalizer for [cliamp](https://cliamp.stream), after the vector part of the Red Sector Inc. RSI Megademo (Amiga, 1989). Five hollow bars stand on a common ground line and tumble through a drifting starfield, each one driven by two spectrum bands. Hidden edges are removed per bar, so a bar shows its front, one flank and its cap, the way the original vector objects do. Sibling of [led-burst](https://github.com/AlexZeitler/cliamp-plugin-led-burst), [block-burst](https://github.com/AlexZeitler/cliamp-plugin-block-burst), [vu-meter](https://github.com/AlexZeitler/cliamp-plugin-vu-meter), [reverb](https://github.com/AlexZeitler/cliamp-plugin-reverb), and [sine-rainbow](https://github.com/AlexZeitler/cliamp-plugin-sine-rainbow).
 
