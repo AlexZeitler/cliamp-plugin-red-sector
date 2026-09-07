@@ -1,10 +1,10 @@
 -- Wireframe equalizer after the vector part of the Red Sector Inc. RSI
 -- Megademo (Amiga, 1989). Five hollow bars stand on a common ground line,
 -- each one driven by two spectrum bands. The whole group rotates as a rigid
--- body while a starfield drifts behind it. Hidden edges are removed with
--- per-face backface culling, so a bar shows its front, one side and its cap,
--- the way the original vector objects do. Bars carry the terminal's spectrum
--- colours, the starfield stays dim behind them.
+-- body while a curve of points turns behind it. Hidden edges are removed with
+-- per-face backface culling, so a bar shows its front, one side and its
+-- slanted top, the way the original vector objects do. Bars carry the
+-- terminal's spectrum colours, the point curve stays dim behind them.
 
 local p = plugin.register({
     name = "red-sector",
@@ -13,22 +13,20 @@ local p = plugin.register({
 
 local ESC = string.char(27)
 local RESET = ESC .. "[0m"
+local TAU = math.pi * 2
 
 -- Cell colour tags, low to high. A cell keeps the highest tag drawn into it,
--- so bars always win over the stars behind them. The four star tags sit below
--- the three bar tags for exactly that reason.
-local STAR_TAG_COUNT = 4
-local TAG_LOW, TAG_MID, TAG_HIGH = 5, 6, 7
+-- so bars always win over the point curve behind them. The curve's tag sits
+-- below the three bar tags for exactly that reason.
+local TAG_POINT = 1
+local TAG_LOW, TAG_MID, TAG_HIGH = 2, 3, 4
 
 -- ANSI 16 so the picture follows the terminal theme. The bar colours match
 -- what cliamp's own spectrum uses on its default theme: bright green, bright
--- yellow, bright red. Each star draws one of the same hues at normal
--- intensity, which keeps the field colourful without competing with the bars.
+-- yellow, bright red. The curve is one colour throughout, plain white at
+-- normal intensity, as the demo draws its points.
 local TAG_COLOR = {
-    ESC .. "[37m", -- white
-    ESC .. "[32m", -- green
-    ESC .. "[33m", -- yellow
-    ESC .. "[31m", -- red
+    [TAG_POINT] = ESC .. "[37m", -- white
     [TAG_LOW] = ESC .. "[92m",
     [TAG_MID] = ESC .. "[93m",
     [TAG_HIGH] = ESC .. "[91m",
@@ -60,6 +58,17 @@ local BAR_PITCH = 0.78    -- centre-to-centre distance between neighbours
 local GROUND_Y = -1.05    -- common base line all bars stand on
 local MIN_HEIGHT = 0.40
 local MAX_HEIGHT = 2.30
+
+-- The original bars do not end in a flat lid. One inclined plane cuts the top,
+-- so a bar stands taller on one side than on the other and its cap is a
+-- slanted face. The drop is measured off an upright bar in the demo: the top
+-- falls by a little more than half the bar's own depth. Which side sits lower
+-- does not show, because the object turns all the way round.
+--
+-- The drop must stay below MIN_HEIGHT or a quiet bar would sink through the
+-- ground line. At half of it a bar at rest still keeps a shaft under the cut.
+local SLANT_DROP = 0.20 -- how far the top falls across the depth of a bar
+
 local FOCAL = 3.2
 local CAMERA_Z = 6.0
 local ZOOM_AMPLITUDE = 1.5  -- how far the object drifts towards the viewer
@@ -73,13 +82,15 @@ local SPIN_X = 0.073      -- unrelated to SPIN_Y, so poses keep changing
 local ZOOM_RATE = 0.011
 
 -- The eight corners of a bar, as signs on its base centre. Height is filled
--- in per frame, so only the signs live here.
+-- in per frame, so only the signs live here. A top corner on the front side
+-- carries the drop of the inclined cut.
 local CORNER_X = { -1, 1, 1, -1, -1, 1, 1, -1 }
 local CORNER_Z = { -1, -1, -1, -1, 1, 1, 1, 1 }
 local CORNER_TOP = { false, false, true, true, false, false, true, true }
 
 -- Faces wound so the cross product of the first two edges points inwards.
--- A face is then visible when that normal points away from the viewer.
+-- A face is then visible when that normal points away from the viewer. The
+-- inclined cut leaves the top a flat quad, so the winding still holds.
 local FACES = {
     { 1, 2, 3, 4 }, -- front
     { 6, 5, 8, 7 }, -- back
@@ -88,6 +99,56 @@ local FACES = {
     { 4, 3, 7, 8 }, -- top
     { 1, 5, 6, 2 }, -- bottom
 }
+
+-- The demo puts no starfield behind the object. It draws a curve of points
+-- and keeps changing its shape: a closed ring, three arms winding out of the
+-- centre, a tight spiral, a three-petal rosette. All of them are one curve
+-- with three numbers changed, so the plugin holds one figure for a while and
+-- then travels to the next.
+--
+-- Three arms start 120 degrees apart and each one walks a sweep of the
+-- circle. sweep is how far it walks: at exactly a third the three meet end to
+-- end and close the figure, beyond that they wind past each other. inner is
+-- where an arm begins, as a share of the radius, so a low value opens the
+-- centre into a spiral. lobe folds the radius in and out three times around,
+-- which is what turns a ring into petals. A negative radius is not an error
+-- there: it carries the point through the centre and out the far side, and
+-- that is how a rosette closes.
+local ARM_COUNT = 3
+-- The list starts on the tight spiral, the one figure whose arms begin at the
+-- centre, so the curve opens out of the origin. The plain closed ring is not
+-- in the list: next to the bars it reads as a circle drawn around them rather
+-- than as one of the figures.
+local FIGURES = {
+    { sweep = TAU * 0.85, inner = 0.08, lobe = 0.00 }, -- tight spiral
+    { sweep = TAU * 0.55, inner = 0.25, lobe = 0.00 }, -- three open arms
+    { sweep = TAU * 0.45, inner = 0.30, lobe = 0.50 }, -- curled arms
+    { sweep = TAU / 3,   inner = 1.00, lobe = 0.45 }, -- three rounded lobes
+    { sweep = TAU / 3,   inner = 1.00, lobe = 0.90 }, -- three petals
+}
+local FIGURE_RATE = 0.0060         -- how fast the list is walked, per frame
+local FIGURE_HOLD = 0.55           -- share of a figure's turn spent standing still
+local POINT_SPIN = 0.014           -- how fast the curve turns inside its own plane
+
+-- The curve is anchored to the panel, not to the object. In the demo its
+-- centre holds the same spot on screen while the object tumbles around it, so
+-- it is laid out in dots and never touches the perspective that carries the
+-- bars. It stays in x and y: the plane does not tip, does not travel in depth
+-- and does not wander. Only its radius changes.
+local POINT_RADIUS = 0.85          -- share of the shorter half panel, at full breath
+-- Breathing is the only change of size the curve has left, so it carries the
+-- growing and shrinking the demo shows. It runs slowly. The share is bounded
+-- well under a half: at a half the curve shrinks to a tenth of its radius and
+-- disappears inside the object, where the bars overdraw it. It is phased off
+-- the cosine, so the first frame sits at the smallest radius and the curve
+-- opens rather than closes.
+local POINT_PULSE = 0.009
+local PULSE_DEPTH = 0.25           -- share of the radius the breathing takes
+
+-- On the first frames the curve grows out of the origin instead of appearing
+-- at full size. This runs off the frame counter, so it plays once, when the
+-- counter is still near zero.
+local OPEN_FRAMES = 90
 
 -- Each band sits at its own resting level and moves only a little around it:
 -- in a measured stream the bass band hovers near the top while the treble
@@ -131,33 +192,6 @@ local function drawLine(grid, tags, cols, dotCols, dotRows, x0, y0, x1, y1, tag)
     end
 end
 
--- Deterministic pseudo-random value in [0, 1) for star index i. The two slots
--- use unrelated multipliers, otherwise x and y stay correlated and the whole
--- field collapses onto a diagonal.
-local STAR_MUL = { 2654435761, 1103515245, 1664525 }
-local STAR_ADD = { 12345, 987651, 1013904223 }
-
-local function starHash(i, k)
-    return ((i * STAR_MUL[k] + STAR_ADD[k]) % 1000003) / 1000003
-end
-
-local function drawStars(grid, tags, cols, dotCols, dotRows, frame)
-    local count = math.floor(dotCols * dotRows / 130)
-    if count < 6 then count = 6 end
-    if count > 90 then count = 90 end
-    for i = 1, count do
-        -- Three speed lanes give the field a shallow sense of depth.
-        local speed = 0.10 + (i % 3) * 0.09
-        local x = (starHash(i, 1) * dotCols - frame * speed) % dotCols
-        local y = math.floor(starHash(i, 2) * dotRows)
-        -- Colour is drawn once per star index, so a star keeps its hue while
-        -- it drifts instead of flickering from frame to frame.
-        local hue = 1 + math.floor(starHash(i, 3) * STAR_TAG_COUNT)
-        if hue > STAR_TAG_COUNT then hue = STAR_TAG_COUNT end
-        plot(grid, tags, cols, dotCols, dotRows, math.floor(x), y, hue)
-    end
-end
-
 -- Rotate a model point around Y then X and project it. Returns the rotated
 -- point plus its projected position in world units, before any panel scaling.
 local function place(x, y, z, cosX, sinX, cosY, sinY, camZ)
@@ -171,6 +205,58 @@ local function place(x, y, z, cosX, sinX, cosY, sinY, camZ)
     return x1, y1, z2, x1 * f, y1 * f
 end
 
+-- The point curve, drawn in the same space as the bars so both share one
+-- perspective. It carries its own rotation and its own path through the
+-- scene, so it turns and travels against the object instead of with it.
+local function drawPointCurve(grid, tags, cols, dotCols, dotRows, frame)
+    local perArm = math.floor(dotCols * dotRows / 130 / ARM_COUNT)
+    if perArm < 8 then perArm = 8 end
+    if perArm > 32 then perArm = 32 end
+
+    -- Walk the list of figures. Each one stands still for most of its turn,
+    -- then eases across to the next, so a shape is readable before it goes.
+    local walk = frame * FIGURE_RATE
+    local step = math.floor(walk)
+    local here = FIGURES[step % #FIGURES + 1]
+    local next_ = FIGURES[(step + 1) % #FIGURES + 1]
+
+    local m = (walk - step - FIGURE_HOLD) / (1 - FIGURE_HOLD)
+    if m < 0 then m = 0 end
+    m = m * m * (3 - 2 * m) -- ease in and out, so no figure snaps into the next
+
+    local sweep = here.sweep + (next_.sweep - here.sweep) * m
+    local inner = here.inner + (next_.inner - here.inner) * m
+    local lobe = here.lobe + (next_.lobe - here.lobe) * m
+    -- A Braille cell holds two dots across and four down, and a terminal cell
+    -- is about twice as tall as it is wide. A dot is therefore close to
+    -- square, so a circle in dots reads as a circle.
+    local halfPanel = math.min(dotCols, dotRows) / 2
+    local radius = POINT_RADIUS * halfPanel *
+        (1 - PULSE_DEPTH - PULSE_DEPTH * math.cos(frame * POINT_PULSE))
+
+    local opening = frame / OPEN_FRAMES
+    if opening > 1 then opening = 1 end
+    radius = radius * opening * opening * (3 - 2 * opening)
+
+    local originX = dotCols / 2
+    local originY = dotRows / 2
+    local phase = frame * POINT_SPIN
+
+    for arm = 0, ARM_COUNT - 1 do
+        local armAngle = arm * TAU / ARM_COUNT
+        for k = 0, perArm - 1 do
+            local t = k / perArm
+            local theta = armAngle + t * sweep + phase
+            local r = radius * (inner + (1 - inner) * t) *
+                (1 - lobe + lobe * math.cos(ARM_COUNT * theta))
+
+            plot(grid, tags, cols, dotCols, dotRows,
+                math.floor(originX + r * math.cos(theta) + 0.5),
+                math.floor(originY - r * math.sin(theta) + 0.5), TAG_POINT)
+        end
+    end
+end
+
 function p:render(bands, frame, rows, cols)
     if rows < 1 or cols < 8 then return "" end
 
@@ -178,8 +264,6 @@ function p:render(bands, frame, rows, cols)
     local dotRows = rows * 4
     local grid = {}
     local tags = {}
-
-    drawStars(grid, tags, cols, dotCols, dotRows, frame)
 
     -- Two bands per bar, taking the louder of the pair. Averaging would let a
     -- silent band halve its partner, and the top band is empty on most
@@ -236,7 +320,8 @@ function p:render(bands, frame, rows, cols)
 
     -- Scale against a hull the object can never exceed, not against the bars
     -- as they stand this frame. Fitting the live shape would blow a quiet
-    -- picture up to full height and leave the bars looking motionless.
+    -- picture up to full height and leave the bars looking motionless. The
+    -- cut only takes material away, so the hull is the plain box.
     local hullX = (BAR_COUNT - 1) / 2 * BAR_PITCH + BAR_HALF_WIDTH
     local minX, maxX = 1e9, -1e9
     local minY, maxY = 1e9, -1e9
@@ -274,6 +359,9 @@ function p:render(bands, frame, rows, cols)
     local centreX = dotCols / 2 - (minX + maxX) / 2 * fitX
     local centreY = dotRows / 2 + (minY + maxY) / 2 * fitY
 
+    -- Order does not decide what a cell shows, the tag does.
+    drawPointCurve(grid, tags, cols, dotCols, dotRows, frame)
+
     local rx, ry, rz = {}, {}, {}
     local px, py = {}, {}
 
@@ -283,7 +371,11 @@ function p:render(bands, frame, rows, cols)
 
         for c = 1, 8 do
             local y = GROUND_Y
-            if CORNER_TOP[c] then y = topY end
+            if CORNER_TOP[c] then
+                y = topY
+                -- The front pair sits lower. That single step is the cut.
+                if CORNER_Z[c] < 0 then y = y - SLANT_DROP end
+            end
             local x1, y1, z2, sx, sy = place(
                 baseX + CORNER_X[c] * BAR_HALF_WIDTH, y,
                 CORNER_Z[c] * BAR_HALF_DEPTH,
@@ -293,7 +385,7 @@ function p:render(bands, frame, rows, cols)
             py[c] = centreY - sy * fitY
         end
 
-        for fi = 1, 6 do
+        for fi = 1, #FACES do
             local face = FACES[fi]
             local i1, i2, i3 = face[1], face[2], face[3]
             local ux, uy, uz = rx[i2] - rx[i1], ry[i2] - ry[i1], rz[i2] - rz[i1]
@@ -327,7 +419,7 @@ function p:render(bands, frame, rows, cols)
             end
 
             local tag = 0
-            if bits ~= 0 then tag = tags[row * cols + col + 1] or 1 end
+            if bits ~= 0 then tag = tags[row * cols + col + 1] or TAG_POINT end
             if tag ~= cur then
                 if cur ~= 0 then parts[#parts + 1] = RESET end
                 if tag ~= 0 then parts[#parts + 1] = TAG_COLOR[tag] end
